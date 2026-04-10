@@ -97,3 +97,7 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# OSM data files
+Assets/StreamingAssets/*.osm
+Assets/StreamingAssets/*.osm.meta
