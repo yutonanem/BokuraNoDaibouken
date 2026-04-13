@@ -5,6 +5,14 @@ using UnityEngine;
 
 public class OSMReader : MonoBehaviour
 {
+    const int MaxBuildings = 2000;
+
+    [Header("Materials")]
+    public Material roadMaterial;
+    public Material waterMaterial;
+    public Material wallMaterial;
+    public Material roofMaterial;
+
     void Start()
     {
         string path = Path.Combine(Application.streamingAssetsPath, "asakusa.osm");
@@ -14,10 +22,11 @@ public class OSMReader : MonoBehaviour
             return;
         }
 
+        EnsureMaterials();
+
         XmlDocument doc = new XmlDocument();
         doc.Load(path);
 
-        // Parse bounds for coordinate centering
         XmlNode boundsNode = doc.SelectSingleNode("//bounds");
         double minLat = double.Parse(boundsNode.Attributes["minlat"].Value);
         double maxLat = double.Parse(boundsNode.Attributes["maxlat"].Value);
@@ -26,7 +35,6 @@ public class OSMReader : MonoBehaviour
         double centerLat = (minLat + maxLat) / 2.0;
         double centerLon = (minLon + maxLon) / 2.0;
 
-        // Parse all nodes (lat/lon)
         Dictionary<string, Vector2d> nodes = new Dictionary<string, Vector2d>();
         XmlNodeList nodeList = doc.SelectNodes("//node");
         foreach (XmlNode n in nodeList)
@@ -37,7 +45,6 @@ public class OSMReader : MonoBehaviour
             nodes[id] = new Vector2d(lat, lon);
         }
 
-        // Parse ways and classify by tag
         XmlNodeList wayList = doc.SelectNodes("//way");
         int highwayCount = 0;
         int waterwayCount = 0;
@@ -47,6 +54,9 @@ public class OSMReader : MonoBehaviour
         {
             WayType type = ClassifyWay(way);
             if (type == WayType.None)
+                continue;
+
+            if (type == WayType.Building && buildingCount >= MaxBuildings)
                 continue;
 
             List<Vector3> points = new List<Vector3>();
@@ -64,38 +74,53 @@ public class OSMReader : MonoBehaviour
             if (points.Count < 2)
                 continue;
 
-            string objName;
-            Color color;
-            float width;
-
             switch (type)
             {
                 case WayType.Highway:
-                    objName = "Road_" + highwayCount;
-                    color = Color.white;
-                    width = 3.0f;
+                    CreateStrip("Road_" + highwayCount, points, 0.5f, 0.05f, roadMaterial);
                     highwayCount++;
                     break;
                 case WayType.Waterway:
-                    objName = "Water_" + waterwayCount;
-                    color = new Color(0.2f, 0.5f, 1.0f);
-                    width = 8.0f;
+                    CreateStrip("Water_" + waterwayCount, points, 2.0f, 0.02f, waterMaterial);
                     waterwayCount++;
                     break;
                 case WayType.Building:
-                    objName = "Bldg_" + buildingCount;
-                    color = new Color(0.6f, 0.6f, 0.6f);
-                    width = 1.5f;
-                    buildingCount++;
+                    if (points.Count >= 3)
+                    {
+                        CreateBuilding("Bldg_" + buildingCount, points);
+                        buildingCount++;
+                    }
                     break;
-                default:
-                    continue;
             }
-
-            CreateLine(objName, points, color, width);
         }
 
         Debug.Log($"OSMReader: Loaded {highwayCount} roads, {waterwayCount} waterways, {buildingCount} buildings");
+    }
+
+    void EnsureMaterials()
+    {
+        Shader litShader = Shader.Find("Universal Render Pipeline/Lit");
+
+        if (roadMaterial == null)
+        {
+            roadMaterial = new Material(litShader);
+            roadMaterial.SetColor("_BaseColor", new Color(0.353f, 0.353f, 0.353f)); // #A0A0A0
+        }
+        if (waterMaterial == null)
+        {
+            waterMaterial = new Material(litShader);
+            waterMaterial.SetColor("_BaseColor", new Color(0.068f, 0.278f, 0.694f)); // #4A90D9
+        }
+        if (wallMaterial == null)
+        {
+            wallMaterial = new Material(litShader);
+            wallMaterial.SetColor("_BaseColor", new Color(0.659f, 0.482f, 0.305f)); // #D4B896
+        }
+        if (roofMaterial == null)
+        {
+            roofMaterial = new Material(litShader);
+            roofMaterial.SetColor("_BaseColor", new Color(0.258f, 0.057f, 0.005f)); // #8B4513
+        }
     }
 
     enum WayType { None, Highway, Waterway, Building }
@@ -118,9 +143,9 @@ public class OSMReader : MonoBehaviour
 
     Vector3 LatLonToUnity(double lat, double lon, double centerLat, double centerLon)
     {
-        // 1 degree latitude ~ 111,320m, 1 degree longitude ~ 111,320m * cos(lat)
-        double metersPerDegreeLat = 111320.0;
-        double metersPerDegreeLon = 111320.0 * System.Math.Cos(centerLat * System.Math.PI / 180.0);
+        // Scale 1/10: 1 Unity unit = 10 real meters
+        double metersPerDegreeLat = 11132.0;
+        double metersPerDegreeLon = 11132.0 * System.Math.Cos(centerLat * System.Math.PI / 180.0);
 
         float x = (float)((lon - centerLon) * metersPerDegreeLon);
         float z = (float)((lat - centerLat) * metersPerDegreeLat);
@@ -128,21 +153,169 @@ public class OSMReader : MonoBehaviour
         return new Vector3(x, 0f, z);
     }
 
-    void CreateLine(string objName, List<Vector3> points, Color color, float width)
+    void CreateStrip(string objName, List<Vector3> points, float width, float yPos, Material mat)
     {
+        int n = points.Count;
+        float halfW = width * 0.5f;
+
+        Vector3[] vertices = new Vector3[n * 2];
+        int[] triangles = new int[(n - 1) * 6];
+
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 forward;
+            if (i < n - 1)
+                forward = (points[i + 1] - points[i]).normalized;
+            else
+                forward = (points[i] - points[i - 1]).normalized;
+
+            Vector3 right = Vector3.Cross(Vector3.up, forward).normalized;
+
+            Vector3 p = new Vector3(points[i].x, yPos, points[i].z);
+            vertices[i * 2 + 0] = p - right * halfW;
+            vertices[i * 2 + 1] = p + right * halfW;
+        }
+
+        for (int i = 0; i < n - 1; i++)
+        {
+            int vi = i * 2;
+            int ti = i * 6;
+            triangles[ti + 0] = vi + 0;
+            triangles[ti + 1] = vi + 2;
+            triangles[ti + 2] = vi + 1;
+            triangles[ti + 3] = vi + 1;
+            triangles[ti + 4] = vi + 2;
+            triangles[ti + 5] = vi + 3;
+        }
+
+        Mesh mesh = new Mesh();
+        mesh.vertices = vertices;
+        mesh.triangles = triangles;
+        mesh.RecalculateNormals();
+
         GameObject go = new GameObject(objName);
         go.transform.SetParent(transform);
+        go.AddComponent<MeshFilter>().mesh = mesh;
+        go.AddComponent<MeshRenderer>().material = mat;
+    }
 
-        LineRenderer lr = go.AddComponent<LineRenderer>();
-        lr.positionCount = points.Count;
-        lr.SetPositions(points.ToArray());
-        lr.startWidth = width;
-        lr.endWidth = width;
-        lr.useWorldSpace = false;
+    void CreateBuilding(string objName, List<Vector3> footprint)
+    {
+        if (footprint.Count > 1 && Vector3.Distance(footprint[0], footprint[footprint.Count - 1]) < 0.001f)
+            footprint.RemoveAt(footprint.Count - 1);
 
-        lr.material = new Material(Shader.Find("Sprites/Default"));
-        lr.startColor = color;
-        lr.endColor = color;
+        if (footprint.Count < 3)
+            return;
+
+        if (CalculateSignedArea(footprint) > 0)
+            footprint.Reverse();
+
+        float height = Random.Range(0.3f, 1.5f);
+        float roofOverhang = 0.03f;
+
+        GameObject buildingRoot = new GameObject(objName);
+        buildingRoot.transform.SetParent(transform);
+
+        CreateWallMesh(buildingRoot, footprint, height);
+        CreateRoofMesh(buildingRoot, footprint, height, roofOverhang);
+    }
+
+    void CreateWallMesh(GameObject parent, List<Vector3> footprint, float height)
+    {
+        int n = footprint.Count;
+        Vector3[] vertices = new Vector3[n * 4];
+        int[] triangles = new int[n * 6];
+
+        for (int i = 0; i < n; i++)
+        {
+            int next = (i + 1) % n;
+            Vector3 bl = footprint[i];
+            Vector3 br = footprint[next];
+            Vector3 tl = bl + Vector3.up * height;
+            Vector3 tr = br + Vector3.up * height;
+
+            int vi = i * 4;
+            vertices[vi + 0] = bl;
+            vertices[vi + 1] = br;
+            vertices[vi + 2] = tl;
+            vertices[vi + 3] = tr;
+
+            int ti = i * 6;
+            triangles[ti + 0] = vi + 0;
+            triangles[ti + 1] = vi + 2;
+            triangles[ti + 2] = vi + 1;
+            triangles[ti + 3] = vi + 1;
+            triangles[ti + 4] = vi + 2;
+            triangles[ti + 5] = vi + 3;
+        }
+
+        Mesh mesh = new Mesh();
+        mesh.vertices = vertices;
+        mesh.triangles = triangles;
+        mesh.RecalculateNormals();
+
+        GameObject wallObj = new GameObject("Wall");
+        wallObj.transform.SetParent(parent.transform, false);
+        wallObj.AddComponent<MeshFilter>().mesh = mesh;
+        wallObj.AddComponent<MeshRenderer>().material = wallMaterial;
+    }
+
+    void CreateRoofMesh(GameObject parent, List<Vector3> footprint, float height, float overhang)
+    {
+        int n = footprint.Count;
+
+        Vector3 centroid = Vector3.zero;
+        for (int i = 0; i < n; i++)
+            centroid += footprint[i];
+        centroid /= n;
+
+        Vector3[] roofPoints = new Vector3[n];
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 dir = (footprint[i] - centroid).normalized;
+            roofPoints[i] = footprint[i] + dir * overhang + Vector3.up * height;
+        }
+
+        Vector3[] vertices = new Vector3[n + 1];
+        Vector3 roofCenter = Vector3.zero;
+        for (int i = 0; i < n; i++)
+        {
+            vertices[i] = roofPoints[i];
+            roofCenter += roofPoints[i];
+        }
+        roofCenter /= n;
+        vertices[n] = roofCenter;
+
+        int[] triangles = new int[n * 3];
+        for (int i = 0; i < n; i++)
+        {
+            int next = (i + 1) % n;
+            triangles[i * 3 + 0] = n;
+            triangles[i * 3 + 1] = i;
+            triangles[i * 3 + 2] = next;
+        }
+
+        Mesh mesh = new Mesh();
+        mesh.vertices = vertices;
+        mesh.triangles = triangles;
+        mesh.RecalculateNormals();
+
+        GameObject roofObj = new GameObject("Roof");
+        roofObj.transform.SetParent(parent.transform, false);
+        roofObj.AddComponent<MeshFilter>().mesh = mesh;
+        roofObj.AddComponent<MeshRenderer>().material = roofMaterial;
+    }
+
+    float CalculateSignedArea(List<Vector3> polygon)
+    {
+        float area = 0f;
+        for (int i = 0; i < polygon.Count; i++)
+        {
+            int next = (i + 1) % polygon.Count;
+            area += polygon[i].x * polygon[next].z;
+            area -= polygon[next].x * polygon[i].z;
+        }
+        return area * 0.5f;
     }
 
     struct Vector2d
